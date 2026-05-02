@@ -29,6 +29,20 @@ from torchvision import datasets, transforms
 
 from datasets import load_dataset  # Hugging Face datasets
 
+def ensure_cifar_downloaded(root):
+    from torchvision import datasets, transforms
+    import os
+
+    path = os.path.join(root, "cifar-10-batches-py")
+
+    if not os.path.exists(path):
+        print("Downloading CIFAR-10 (one-time)...")
+        datasets.CIFAR10(root, train=True, download=True, transform=transforms.ToTensor())
+        datasets.CIFAR10(root, train=False, download=True, transform=transforms.ToTensor())
+        print("CIFAR download complete.")
+    else:
+        print("CIFAR already exists. Skipping download.")
+
 
 # ---------------------------------------------------------------------------
 # CONFIG — edit these instead of using command-line flags
