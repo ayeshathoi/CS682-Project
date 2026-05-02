@@ -129,8 +129,8 @@ def get_fashion_mnist_loaders(batch_size, root, num_workers):
         transforms.ToTensor(),
         transforms.Normalize((0.286,) * 3, (0.353,) * 3),
     ])
-    train = HFFashionMNIST("train", tfm_train)
-    test  = HFFashionMNIST("test",  tfm_test)
+    train = datasets.FashionMNIST(root, train=True, download=True, transform=tfm_train)
+    test  = datasets.FashionMNIST(root, train=False, download=True, transform=tfm_test)
     return (DataLoader(train, batch_size=batch_size, shuffle=True,
                        num_workers=num_workers, pin_memory=True),
             DataLoader(test,  batch_size=256, shuffle=False,
