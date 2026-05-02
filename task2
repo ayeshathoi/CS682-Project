@@ -374,9 +374,12 @@ def run(cfg=None):
     print(f'>> secret Fashion-MNIST test ACC: {secret_acc:.2f}%')
     torch.save(secret.state_dict(), os.path.join(c['out'], 'secret.pt'))
 
-    # 2. Build the steganographic key K
+       # 2. Build the steganographic key K
+    ensure_cifar_downloaded(c['data_root'])
+
     cf_train, cf_test = get_cifar10_loaders(
         c['batch_size'], c['data_root'], c['num_workers'])
+
     stego = VGG11(in_channels=3, num_classes=10).to(device)
     key = make_key(secret, stego, seed=c['key_seed'])
     torch.save({'perms': key.perms, 'signs': key.signs, 'shapes': key.shapes},
