@@ -1,0 +1,400 @@
+"""
+Intra-task DNN Steganography (Colab / Jupyter friendly)
+Paper: "Towards Deep Network Steganography: From Networks to Networks"
+
+Setup:
+  - Secret DNN: VGG11 trained on Fashion-MNIST (loaded via Hugging Face)
+  - Stego  DNN: VGG11 trained on CIFAR10  (D_st)
+  - Goal: hide the secret network inside the stego network's weights
+          such that (a) stego achieves good CIFAR10 ACC and
+                    (b) the secret can be extracted (using key K) and
+                        still achieve good Fashion-MNIST ACC.
+
+Usage in a notebook:
+    !pip install datasets --quiet      # one-time
+    %run dnn_steganography_full.py     # or paste this whole file
+    results = run({'secret_epochs': 3, 'stego_epochs': 3})   # smoke test
+    results = run()                                          # full training
+"""
+
+import os
+import random
+from dataclasses import dataclass
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, Dataset
+from torchvision import datasets, transforms
+
+from datasets import load_dataset  # Hugging Face datasets
+
+
+# ---------------------------------------------------------------------------
+# CONFIG — edit these instead of using command-line flags
+# ---------------------------------------------------------------------------
+CONFIG = dict(
+    secret_epochs = 20,
+    stego_epochs  = 40,
+    batch_size    = 128,
+    lam           = 1.0,     # weight on extraction-fidelity loss
+    key_seed      = 1234,
+    seed          = 0,
+    data_root     = './data',
+    out           = './ckpt',
+    num_workers   = 2,
+)
+
+
+# ---------------------------------------------------------------------------
+# VGG11 with batch-norm (32x32 RGB input)
+# ---------------------------------------------------------------------------
+VGG11_CFG = [64, 'M', 128, 'M', 256, 256, 'M', 512, 512, 'M', 512, 512, 'M']
+
+
+class VGG11(nn.Module):
+    def __init__(self, in_channels: int = 3, num_classes: int = 10):
+        super().__init__()
+        layers = []
+        c = in_channels
+        for v in VGG11_CFG:
+            if v == 'M':
+                layers.append(nn.MaxPool2d(2, 2))
+            else:
+                layers += [
+                    nn.Conv2d(c, v, kernel_size=3, padding=1, bias=False),
+                    nn.BatchNorm2d(v),
+                    nn.ReLU(inplace=True),
+                ]
+                c = v
+        self.features = nn.Sequential(*layers)
+        # 32x32 input -> after 5 max-pools -> 1x1 spatial
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(512, 512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(512, num_classes),
+        )
+
+    def forward(self, x):
+        return self.classifier(self.features(x))
+
+
+# ---------------------------------------------------------------------------
+# Data: Fashion-MNIST via Hugging Face, CIFAR-10 via torchvision
+# ---------------------------------------------------------------------------
+class HFFashionMNIST(Dataset):
+    """Fashion-MNIST loaded from Hugging Face (avoids the broken torchvision
+    Fashion-MNIST mirror)."""
+    def __init__(self, split, transform):
+        self.ds = load_dataset("zalando-datasets/fashion_mnist", split=split)
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.ds)
+
+    def __getitem__(self, i):
+        ex = self.ds[i]
+        return self.transform(ex["image"]), ex["label"]
+
+
+def get_fashion_mnist_loaders(batch_size, root, num_workers):
+    """Fashion-MNIST as 3-channel 32x32 so VGG11 architecture is identical
+    for secret and stego (intra-task: identical param shapes)."""
+    tfm_train = transforms.Compose([
+        transforms.Resize(32),
+        transforms.Grayscale(num_output_channels=3),
+        transforms.RandomCrop(32, padding=4),
+        transforms.ToTensor(),
+        transforms.Normalize((0.286,) * 3, (0.353,) * 3),
+    ])
+    tfm_test = transforms.Compose([
+        transforms.Resize(32),
+        transforms.Grayscale(num_output_channels=3),
+        transforms.ToTensor(),
+        transforms.Normalize((0.286,) * 3, (0.353,) * 3),
+    ])
+    train = HFFashionMNIST("train", tfm_train)
+    test  = HFFashionMNIST("test",  tfm_test)
+    return (DataLoader(train, batch_size=batch_size, shuffle=True,
+                       num_workers=num_workers, pin_memory=True),
+            DataLoader(test,  batch_size=256, shuffle=False,
+                       num_workers=num_workers, pin_memory=True))
+
+
+class HFCIFAR10(Dataset):
+    def __init__(self, split, transform):
+        self.ds = load_dataset("uoft-cs/cifar10", split=split)
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.ds)
+
+    def __getitem__(self, i):
+        ex = self.ds[i]
+        return self.transform(ex["img"]), ex["label"]
+
+
+def get_cifar10_loaders(batch_size, root, num_workers):
+    mean = (0.4914, 0.4822, 0.4465)
+    std  = (0.2470, 0.2435, 0.2616)
+
+    tfm_train = transforms.Compose([
+        transforms.RandomCrop(32, padding=4),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize(mean, std),
+    ])
+
+    tfm_test = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean, std),
+    ])
+
+    train = HFCIFAR10("train", tfm_train)
+    test  = HFCIFAR10("test", tfm_test)
+
+    return (
+        DataLoader(train, batch_size=batch_size, shuffle=True,
+                   num_workers=num_workers, pin_memory=True),
+        DataLoader(test, batch_size=256, shuffle=False,
+                   num_workers=num_workers, pin_memory=True)
+    )
+
+# ---------------------------------------------------------------------------
+# Train / eval helpers
+# ---------------------------------------------------------------------------
+def evaluate(model, loader, device):
+    model.eval()
+    correct, total = 0, 0
+    with torch.no_grad():
+        for x, y in loader:
+            x = x.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True)
+            pred = model(x).argmax(1)
+            correct += (pred == y).sum().item()
+            total += y.size(0)
+    return 100.0 * correct / total
+
+
+def train_classifier(model, train_loader, test_loader, device,
+                     epochs=30, lr=0.05, momentum=0.9, weight_decay=5e-4,
+                     tag='model'):
+    opt = torch.optim.SGD(model.parameters(), lr=lr,
+                          momentum=momentum, weight_decay=weight_decay,
+                          nesterov=True)
+    sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
+    crit = nn.CrossEntropyLoss()
+    best = 0.0
+    for ep in range(1, epochs + 1):
+        model.train()
+        running = 0.0
+        for x, y in train_loader:
+            x = x.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True)
+            opt.zero_grad()
+            loss = crit(model(x), y)
+            loss.backward()
+            opt.step()
+            running += loss.item() * x.size(0)
+        sch.step()
+        acc = evaluate(model, test_loader, device)
+        best = max(best, acc)
+        print(f'[{tag}] epoch {ep:3d}/{epochs}  '
+              f'loss={running/len(train_loader.dataset):.4f}  test_acc={acc:.2f}%')
+    return best
+
+
+# ---------------------------------------------------------------------------
+# Steganographic key + extraction
+# ---------------------------------------------------------------------------
+@dataclass
+class StegoKey:
+    perms: dict   # name -> LongTensor of indices into the stego pool
+    signs: dict   # name -> FloatTensor (+/-1)
+    shapes: dict  # name -> tuple, shape of the secret parameter
+
+
+def _is_param(n):
+    return ('weight' in n or 'bias' in n)
+
+
+def _named_params(model):
+    return [(n, p) for n, p in model.named_parameters() if _is_param(n)]
+
+
+def make_key(secret_model, stego_model, seed=1234):
+    """Build a key K. Because secret and stego share architecture, the pool
+    size equals the total parameter count of either model."""
+    g = torch.Generator().manual_seed(seed)
+    pool_size = sum(p.numel() for _, p in _named_params(stego_model))
+    perms, signs, shapes = {}, {}, {}
+    for n, p in _named_params(secret_model):
+        k = p.numel()
+        perm = torch.randperm(pool_size, generator=g)[:k]
+        sign = torch.where(torch.rand(k, generator=g) < 0.5,
+                           torch.tensor(-1.0), torch.tensor(1.0))
+        perms[n] = perm
+        signs[n] = sign
+        shapes[n] = tuple(p.shape)
+    return StegoKey(perms=perms, signs=signs, shapes=shapes)
+
+
+def stego_pool(stego_model):
+    """Concatenate stego's learnable parameters into a 1-D tensor (kept in
+    the autograd graph so gradients can flow through extraction)."""
+    flats = [p.reshape(-1) for _, p in _named_params(stego_model)]
+    return torch.cat(flats, dim=0)
+
+
+def extract_secret_params(stego_model, key: StegoKey, device):
+    """Differentiable extraction: returns dict name -> tensor of secret shape."""
+    pool = stego_pool(stego_model)
+    out = {}
+    for name, perm in key.perms.items():
+        sign = key.signs[name].to(device)
+        idx = perm.to(device)
+        out[name] = (sign * pool[idx]).reshape(key.shapes[name])
+    return out
+
+
+def load_extracted_into_model(model, extracted: dict):
+    sd = model.state_dict()
+    with torch.no_grad():
+        for n, _ in model.named_parameters():
+            if n in extracted:
+                sd[n].copy_(extracted[n])
+        model.load_state_dict(sd)
+
+
+def recalibrate_bn(model, loader, device, num_batches=50):
+    """Refresh BN running stats with a few forward passes on the secret-task
+    data after extraction (BN buffers are not part of the hidden parameters)."""
+    model.train()
+    with torch.no_grad():
+        for i, (x, _) in enumerate(loader):
+            if i >= num_batches:
+                break
+            model(x.to(device, non_blocking=True))
+    model.eval()
+
+
+# ---------------------------------------------------------------------------
+# Stego training: classification + extraction-fidelity loss
+# ---------------------------------------------------------------------------
+def train_stego(stego_model, secret_state, key, train_loader, test_loader,
+                device, epochs=40, lr=0.05, lam=1.0, tag='stego'):
+    secret_targets = {n: v.detach().to(device) for n, v in secret_state.items()
+                      if n in key.perms}
+
+    opt = torch.optim.SGD(stego_model.parameters(), lr=lr,
+                          momentum=0.9, weight_decay=5e-4, nesterov=True)
+    sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
+    crit = nn.CrossEntropyLoss()
+
+    for ep in range(1, epochs + 1):
+        stego_model.train()
+        run_cls, run_steg, n_seen = 0.0, 0.0, 0
+        for x, y in train_loader:
+            x = x.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True)
+            opt.zero_grad()
+
+            cls_loss = crit(stego_model(x), y)
+
+            # Steganographic loss: extracted params should equal the secret.
+            extracted = extract_secret_params(stego_model, key, device)
+            steg_loss = 0.0
+            for n, t in extracted.items():
+                steg_loss = steg_loss + F.mse_loss(t, secret_targets[n], reduction='mean')
+            steg_loss = steg_loss / max(1, len(extracted))
+
+            loss = cls_loss + lam * steg_loss
+            loss.backward()
+            opt.step()
+
+            bs = x.size(0)
+            run_cls  += cls_loss.item() * bs
+            run_steg += steg_loss.item() * bs
+            n_seen   += bs
+        sch.step()
+        acc = evaluate(stego_model, test_loader, device)
+        print(f'[{tag}] ep {ep:3d}/{epochs}  '
+              f'cls={run_cls/n_seen:.4f}  steg={run_steg/n_seen:.6f}  '
+              f'cifar_acc={acc:.2f}%')
+
+
+# ---------------------------------------------------------------------------
+# Driver
+# ---------------------------------------------------------------------------
+def set_seed(s):
+    random.seed(s)
+    torch.manual_seed(s)
+    torch.cuda.manual_seed_all(s)
+
+
+def run(cfg=None):
+    """Run the full pipeline. Pass a dict to override CONFIG values, e.g.
+        run({'secret_epochs': 3, 'stego_epochs': 3})    # quick smoke test
+        run({'lam': 2.0})                               # tune the trade-off
+    """
+    c = dict(CONFIG)
+    if cfg:
+        c.update(cfg)
+
+    set_seed(c['seed'])
+    os.makedirs(c['out'], exist_ok=True)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print('device:', device)
+    print('config:', c)
+
+    # 1. Train secret VGG11 on Fashion-MNIST
+    fm_train, fm_test = get_fashion_mnist_loaders(
+        c['batch_size'], c['data_root'], c['num_workers'])
+    secret = VGG11(in_channels=3, num_classes=10).to(device)
+    print('\n=== Training SECRET VGG11 on Fashion-MNIST ===')
+    secret_acc = train_classifier(secret, fm_train, fm_test, device,
+                                  epochs=c['secret_epochs'], tag='secret')
+    print(f'>> secret Fashion-MNIST test ACC: {secret_acc:.2f}%')
+    torch.save(secret.state_dict(), os.path.join(c['out'], 'secret.pt'))
+
+    # 2. Build the steganographic key K
+    cf_train, cf_test = get_cifar10_loaders(
+        c['batch_size'], c['data_root'], c['num_workers'])
+    stego = VGG11(in_channels=3, num_classes=10).to(device)
+    key = make_key(secret, stego, seed=c['key_seed'])
+    torch.save({'perms': key.perms, 'signs': key.signs, 'shapes': key.shapes},
+               os.path.join(c['out'], 'key.pt'))
+
+    # 3. Train stego VGG11 on CIFAR10 with the dual loss
+    print('\n=== Training STEGO VGG11 on CIFAR10 (with extraction loss) ===')
+    secret_state = {n: p.detach().clone()
+                    for n, p in secret.named_parameters() if _is_param(n)}
+    train_stego(stego, secret_state, key, cf_train, cf_test, device,
+                epochs=c['stego_epochs'], lam=c['lam'], tag='stego')
+    stego_acc = evaluate(stego, cf_test, device)
+    print(f'>> stego CIFAR10 test ACC: {stego_acc:.2f}%')
+    torch.save(stego.state_dict(), os.path.join(c['out'], 'stego.pt'))
+
+    # 4. Extract the secret from the stego and evaluate
+    print('\n=== Extracting SECRET from STEGO using key K ===')
+    extracted = extract_secret_params(stego, key, device)
+    recovered = VGG11(in_channels=3, num_classes=10).to(device)
+    load_extracted_into_model(recovered,
+                              {n: t.detach() for n, t in extracted.items()})
+    recalibrate_bn(recovered, fm_train, device, num_batches=50)
+    rec_acc = evaluate(recovered, fm_test, device)
+    print(f'>> recovered secret Fashion-MNIST test ACC: {rec_acc:.2f}%')
+
+    print('\n========== SUMMARY ==========')
+    print(f'Secret    (Fashion-MNIST) ACC : {secret_acc:.2f}%')
+    print(f'Stego     (CIFAR10)       ACC : {stego_acc:.2f}%')
+    print(f'Recovered (Fashion-MNIST) ACC : {rec_acc:.2f}%')
+
+    return dict(secret_acc=secret_acc, stego_acc=stego_acc, rec_acc=rec_acc,
+                secret=secret, stego=stego, recovered=recovered, key=key)
+
+
+if __name__ == '__main__':
+    run()
