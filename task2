@@ -152,8 +152,9 @@ def get_cifar10_loaders(batch_size, root, num_workers):
         transforms.Normalize(mean, std),
     ])
 
-    train = HFCIFAR10("train", tfm_train)
-    test  = HFCIFAR10("test", tfm_test)
+    #  USE torchvision instead of Hugging Face
+    train = datasets.CIFAR10(root, train=True, download=True, transform=tfm_train)
+    test  = datasets.CIFAR10(root, train=False, download=True, transform=tfm_test)
 
     return (
         DataLoader(train, batch_size=batch_size, shuffle=True,
