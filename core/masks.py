@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 
 from core.gfi import _features_indices_of_convs
+from core.gfi_seq import conv_indices_in_seq
 from core.sih import SideInfo
 from models.vgg11 import VGG11
 
@@ -100,7 +101,7 @@ def build_partial_masks(model: VGG11, roles: Dict[int, torch.Tensor]) -> Dict[st
     return param_to_mask
 
 
-def apply_grad_mask_(model: VGG11, masks: Dict[str, torch.Tensor]) -> None:
+def apply_grad_mask_(model: nn.Module, masks: Dict[str, torch.Tensor]) -> None:
     for name, p in model.named_parameters():
         if p.grad is None:
             continue
@@ -121,6 +122,59 @@ def statistical_loss_conv(model_a: VGG11, model_b: VGG11) -> Tuple[torch.Tensor,
     for fi in idx_a:
         wa = model_a.features[fi].weight
         wb = model_b.features[fi].weight
+        ma, sa = wa.mean(), wa.std()
+        mb, sb = wb.mean(), wb.std()
+        l_mu = l_mu + (ma - mb).pow(2)
+        l_sig = l_sig + (sa - sb).pow(2)
+    return l_mu, l_sig
+
+
+def build_partial_masks_dual_encoder(
+    model: nn.Module,
+    roles: Dict[int, torch.Tensor],
+    encoder_attr: str = "encoder",
+) -> Dict[str, torch.Tensor]:
+    """POS masks for DualHeadDnCNN-style modules: train interference + stego head; freeze secret + side."""
+    enc = getattr(model, encoder_attr)
+    conv_idx = conv_indices_in_seq(enc)
+    per_rank_in_roles: Dict[int, Optional[torch.Tensor]] = {}
+    for rank in sorted(roles.keys()):
+        per_rank_in_roles[rank] = None if rank == 0 else roles[rank - 1]
+
+    param_to_mask: Dict[str, torch.Tensor] = {}
+    for rank, fi in enumerate(conv_idx):
+        conv = enc[fi]
+        assert isinstance(conv, nn.Conv2d)
+        wm, bm = conv_weight_bias_masks(conv, roles[rank], per_rank_in_roles[rank])
+        param_to_mask[f"{encoder_attr}.{fi}.weight"] = wm.expand_as(conv.weight)
+        if conv.bias is not None:
+            param_to_mask[f"{encoder_attr}.{fi}.bias"] = bm
+
+    sh = model.secret_head
+    param_to_mask["secret_head.weight"] = torch.zeros_like(sh.weight)
+    th = model.stego_head
+    param_to_mask["stego_head.weight"] = torch.ones_like(th.weight)
+    if th.bias is not None:
+        param_to_mask["stego_head.bias"] = torch.ones_like(th.bias)
+    return param_to_mask
+
+
+def statistical_loss_encoder(
+    model_a: nn.Module,
+    model_b: nn.Module,
+    encoder_attr: str = "encoder",
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Eq. (6) over Conv2d weights inside encoder Sequential."""
+    seq_a = getattr(model_a, encoder_attr)
+    seq_b = getattr(model_b, encoder_attr)
+    idx_a = conv_indices_in_seq(seq_a)
+    idx_b = conv_indices_in_seq(seq_b)
+    assert idx_a == idx_b
+    l_mu = seq_a[idx_a[0]].weight.new_tensor(0.0)
+    l_sig = seq_a[idx_a[0]].weight.new_tensor(0.0)
+    for fi in idx_a:
+        wa = seq_a[fi].weight
+        wb = seq_b[fi].weight
         ma, sa = wa.mean(), wa.std()
         mb, sb = wb.mean(), wb.std()
         l_mu = l_mu + (ma - mb).pow(2)
