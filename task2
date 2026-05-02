@@ -123,26 +123,44 @@ def get_fashion_mnist_loaders(batch_size, root, num_workers):
                        num_workers=num_workers, pin_memory=True))
 
 
+class HFCIFAR10(Dataset):
+    def __init__(self, split, transform):
+        self.ds = load_dataset("uoft-cs/cifar10", split=split)
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.ds)
+
+    def __getitem__(self, i):
+        ex = self.ds[i]
+        return self.transform(ex["img"]), ex["label"]
+
+
 def get_cifar10_loaders(batch_size, root, num_workers):
     mean = (0.4914, 0.4822, 0.4465)
     std  = (0.2470, 0.2435, 0.2616)
+
     tfm_train = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         transforms.Normalize(mean, std),
     ])
+
     tfm_test = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize(mean, std),
     ])
-    train = datasets.CIFAR10(root, train=True,  download=True, transform=tfm_train)
-    test  = datasets.CIFAR10(root, train=False, download=True, transform=tfm_test)
-    return (DataLoader(train, batch_size=batch_size, shuffle=True,
-                       num_workers=num_workers, pin_memory=True),
-            DataLoader(test,  batch_size=256, shuffle=False,
-                       num_workers=num_workers, pin_memory=True))
 
+    train = HFCIFAR10("train", tfm_train)
+    test  = HFCIFAR10("test", tfm_test)
+
+    return (
+        DataLoader(train, batch_size=batch_size, shuffle=True,
+                   num_workers=num_workers, pin_memory=True),
+        DataLoader(test, batch_size=256, shuffle=False,
+                   num_workers=num_workers, pin_memory=True)
+    )
 
 # ---------------------------------------------------------------------------
 # Train / eval helpers
