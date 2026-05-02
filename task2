@@ -29,20 +29,6 @@ from torchvision import datasets, transforms
 
 from datasets import load_dataset  # Hugging Face datasets
 
-def ensure_cifar_downloaded(root):
-    from torchvision import datasets, transforms
-    import os
-
-    path = os.path.join(root, "cifar-10-batches-py")
-
-    if not os.path.exists(path):
-        print("Downloading CIFAR-10 (one-time)...")
-        datasets.CIFAR10(root, train=True, download=True, transform=transforms.ToTensor())
-        datasets.CIFAR10(root, train=False, download=True, transform=transforms.ToTensor())
-        print("CIFAR download complete.")
-    else:
-        print("CIFAR already exists. Skipping download.")
-
 
 # ---------------------------------------------------------------------------
 # CONFIG — edit these instead of using command-line flags
@@ -129,8 +115,8 @@ def get_fashion_mnist_loaders(batch_size, root, num_workers):
         transforms.ToTensor(),
         transforms.Normalize((0.286,) * 3, (0.353,) * 3),
     ])
-    train = datasets.FashionMNIST(root, train=True, download=True, transform=tfm_train)
-    test  = datasets.FashionMNIST(root, train=False, download=True, transform=tfm_test)
+    train = HFFashionMNIST("train", tfm_train)
+    test  = HFFashionMNIST("test",  tfm_test)
     return (DataLoader(train, batch_size=batch_size, shuffle=True,
                        num_workers=num_workers, pin_memory=True),
             DataLoader(test,  batch_size=256, shuffle=False,
@@ -166,9 +152,8 @@ def get_cifar10_loaders(batch_size, root, num_workers):
         transforms.Normalize(mean, std),
     ])
 
-    #  USE torchvision instead of Hugging Face
-    train = datasets.CIFAR10(root, train=True, download=True, transform=tfm_train)
-    test  = datasets.CIFAR10(root, train=False, download=True, transform=tfm_test)
+    train = HFCIFAR10("train", tfm_train)
+    test  = HFCIFAR10("test", tfm_test)
 
     return (
         DataLoader(train, batch_size=batch_size, shuffle=True,
@@ -375,11 +360,8 @@ def run(cfg=None):
     torch.save(secret.state_dict(), os.path.join(c['out'], 'secret.pt'))
 
     # 2. Build the steganographic key K
-    ensure_cifar_downloaded(c['data_root'])
-
     cf_train, cf_test = get_cifar10_loaders(
         c['batch_size'], c['data_root'], c['num_workers'])
-
     stego = VGG11(in_channels=3, num_classes=10).to(device)
     key = make_key(secret, stego, seed=c['key_seed'])
     torch.save({'perms': key.perms, 'signs': key.signs, 'shapes': key.shapes},
