@@ -11,6 +11,7 @@ from core.gfi import remove_filter_at
 from core.gfi_seq import conv_indices_in_seq
 from core.sih import SideInfo, extract_payload_from_side, extract_payload_from_side_encoder
 from models.vgg11 import VGG11
+from core.gfi_seq import remove_filter_seq
 
 
 def extract_secret_model(stego: VGG11, side: SideInfo, key: bytes, gfi_shapes: Dict[int, int]) -> VGG11:
