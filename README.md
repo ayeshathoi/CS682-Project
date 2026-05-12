@@ -66,6 +66,16 @@ Ayesha Binte Mostofa, Meghashrita Das, Moumita Karmakar
 
 ---
 
+## 📄 Project Materials
+
+The project poster and detailed report are available here:
+
+- 📄 [Poster](https://github.com/ayeshathoi/CS682-Project/blob/second_branch/CS682%20Poster.pdf)  
+- 📘 [Report](https://github.com/ayeshathoi/CS682-Project/blob/second_branch/report.pdf)
+
+
+---
+
 ## 📜 License
 
 This project is intended for academic use only.
