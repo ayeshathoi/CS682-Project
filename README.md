@@ -44,7 +44,7 @@ Structural information about inserted channels is encoded using a key-based sche
 
 We evaluate our method on standard vision benchmarks:
 
-- CIFAR-10 (cover task)
+- CIFAR-10 (cover task in intra-task setting)
 - Fashion-MNIST (secret task in intra-task setting)
 - Oxford-IIIT Pet (cover task in inter-task setting)
 - DnCNN-based image denoising (secret task in inter-task setting)
@@ -57,24 +57,6 @@ We evaluate our method on standard vision benchmarks:
 - Meaningful but degraded recovery in inter-task setting  
 - Strong preservation of cover-task performance  
 - Gradient-based insertion consistently performs best among all strategies  
-
----
-
-## 🚀 How to Run
-
-### Install dependencies
-```bash
-pip install -r requirements.txt
-```
----
-
-## 🔑 Key Features
-
-- Unified steganography pipeline for both intra-task and inter-task settings
-- Full neural network embedding and recovery
-- Key-based extraction mechanism
-- Three insertion strategies (GFI, RPI, WBFI)
-= Works across different architectures and task types
 
 ---
 
