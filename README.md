@@ -25,10 +25,12 @@ We propose a unified pipeline consisting of three main stages:
 ### 1. Filter Insertion
 Extra interference filters are inserted into selected locations of the network.
 
-We evaluate three strategies:
+We evaluate three strategies for intra-task steganography:
 - Gradient-Based Filter Insertion (GFI)
 - Random Point Insertion (RPI)
 - Weight-Based Filter Insertion (WBFI)
+
+For inter-task steganography, we consider only the Gradient-Based Filter Insertion (GFI) strategy.
 
 ### 2. Side Information Hiding (SIH)
 Structural information about inserted channels is encoded using a key-based scheme and embedded into a designated filter using LSB encoding.
